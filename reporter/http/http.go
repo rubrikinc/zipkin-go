@@ -75,12 +75,12 @@ func (r *httpReporter) loop() {
 			if currentBatchSize >= r.batchSize {
 				// Try to send, but don't block incoming spans
 				select {
-				case r.overflowC <- {}:
+				case r.overflowC <- struct{}{}:
 				default:
 				}
 			}
 		case <-r.quit:
-			r.quitBatch <- {}
+			r.quitBatch <- struct{}{}
 			return
 		}
 	}
@@ -103,16 +103,15 @@ func (r *httpReporter) append(span *model.SpanModel) (newBatchSize int) {
 
 func (r *httpReporter) batchLoop() {
 	var (
-		ticker     = time.NewTicker(r.batchInterval)
-		tickerChan = ticker.C
+		ticker = time.NewTicker(r.batchInterval)
 	)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-r.overflowC:
-			ticker.resetTicker()
+			ticker = time.NewTicker(r.batchInterval)
 			_ = r.sendBatch()
-		case <-tickerChan:
+		case <-ticker.C:
 			_ = r.sendBatch()
 		case <-r.quitBatch:
 			r.shutdown <- r.sendBatch()
