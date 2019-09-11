@@ -109,6 +109,7 @@ func (r *httpReporter) batchLoop() {
 	for {
 		select {
 		case <-r.overflowC:
+			ticker.Stop()
 			ticker = time.NewTicker(r.batchInterval)
 			_ = r.sendBatch()
 		case <-ticker.C:
