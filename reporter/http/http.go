@@ -46,11 +46,10 @@ type httpReporter struct {
 	batchSize     int
 	maxBacklog    int
 	batchMtx      *sync.Mutex
-	overflowC     chan struct{}
+	fullBatch     chan struct{}
 	batch         []*model.SpanModel
 	spanC         chan *model.SpanModel
 	quit          chan struct{}
-	quitBatch     chan struct{}
 	shutdown      chan error
 	reqCallback   RequestCallbackFn
 	serializer    reporter.SpanSerializer
@@ -75,12 +74,11 @@ func (r *httpReporter) loop() {
 			if currentBatchSize >= r.batchSize {
 				// Try to send, but don't block incoming spans
 				select {
-				case r.overflowC <- struct{}{}:
+				case r.fullBatch <- struct{}{}:
 				default:
 				}
 			}
 		case <-r.quit:
-			r.quitBatch <- struct{}{}
 			return
 		}
 	}
@@ -102,19 +100,16 @@ func (r *httpReporter) append(span *model.SpanModel) (newBatchSize int) {
 }
 
 func (r *httpReporter) batchLoop() {
-	var (
-		ticker = time.NewTicker(r.batchInterval)
-	)
-	defer ticker.Stop()
+	ticker := time.NewTicker(r.batchInterval)
 	for {
 		select {
-		case <-r.overflowC:
+		case <-r.fullBatch:
 			ticker.Stop()
 			ticker = time.NewTicker(r.batchInterval)
 			_ = r.sendBatch()
 		case <-ticker.C:
 			_ = r.sendBatch()
-		case <-r.quitBatch:
+		case <-r.quit:
 			r.shutdown <- r.sendBatch()
 			return
 		}
@@ -239,7 +234,7 @@ func NewReporter(url string, opts ...ReporterOption) reporter.Reporter {
 		quit:          make(chan struct{}, 1),
 		shutdown:      make(chan error, 1),
 		batchMtx:      &sync.Mutex{},
-		overflowC:     make(chan struct{}, 1),
+		fullBatch:     make(chan struct{}, 1),
 		serializer:    reporter.JSONSerializer{},
 	}
 
