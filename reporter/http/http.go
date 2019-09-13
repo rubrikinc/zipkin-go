@@ -101,7 +101,7 @@ func (r *httpReporter) append(span *model.SpanModel) (newBatchSize int) {
 
 func (r *httpReporter) batchLoop() {
 	ticker := time.NewTicker(r.batchInterval)
-	defer func() { ticker.Close() }()
+	defer func() { ticker.Stop() }()
 	for {
 		select {
 		case <-r.fullBatch:
