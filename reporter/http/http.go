@@ -45,8 +45,8 @@ type httpReporter struct {
 	batchInterval time.Duration
 	batchSize     int
 	maxBacklog    int
-	sendMtx       *sync.Mutex
 	batchMtx      *sync.Mutex
+	fullBatch     chan struct{}
 	batch         []*model.SpanModel
 	spanC         chan *model.SpanModel
 	quit          chan struct{}
@@ -67,32 +67,18 @@ func (r *httpReporter) Close() error {
 }
 
 func (r *httpReporter) loop() {
-	var (
-		nextSend   = time.Now().Add(r.batchInterval)
-		ticker     = time.NewTicker(r.batchInterval / 10)
-		tickerChan = ticker.C
-	)
-	defer ticker.Stop()
-
 	for {
 		select {
 		case span := <-r.spanC:
 			currentBatchSize := r.append(span)
 			if currentBatchSize >= r.batchSize {
-				nextSend = time.Now().Add(r.batchInterval)
-				go func() {
-					_ = r.sendBatch()
-				}()
-			}
-		case <-tickerChan:
-			if time.Now().After(nextSend) {
-				nextSend = time.Now().Add(r.batchInterval)
-				go func() {
-					_ = r.sendBatch()
-				}()
+				// Try to send, but don't block incoming spans
+				select {
+				case r.fullBatch <- struct{}{}:
+				default:
+				}
 			}
 		case <-r.quit:
-			r.shutdown <- r.sendBatch()
 			return
 		}
 	}
@@ -113,11 +99,25 @@ func (r *httpReporter) append(span *model.SpanModel) (newBatchSize int) {
 	return
 }
 
-func (r *httpReporter) sendBatch() error {
-	// in order to prevent sending the same batch twice
-	r.sendMtx.Lock()
-	defer r.sendMtx.Unlock()
+func (r *httpReporter) batchLoop() {
+	ticker := time.NewTicker(r.batchInterval)
+	defer func() { ticker.Close() }()
+	for {
+		select {
+		case <-r.fullBatch:
+			ticker.Stop()
+			ticker = time.NewTicker(r.batchInterval)
+			_ = r.sendBatch()
+		case <-ticker.C:
+			_ = r.sendBatch()
+		case <-r.quit:
+			r.shutdown <- r.sendBatch()
+			return
+		}
+	}
+}
 
+func (r *httpReporter) sendBatch() error {
 	// Select all current spans in the batch to be sent
 	r.batchMtx.Lock()
 	sendBatch := r.batch[:]
@@ -234,8 +234,8 @@ func NewReporter(url string, opts ...ReporterOption) reporter.Reporter {
 		spanC:         make(chan *model.SpanModel),
 		quit:          make(chan struct{}, 1),
 		shutdown:      make(chan error, 1),
-		sendMtx:       &sync.Mutex{},
 		batchMtx:      &sync.Mutex{},
+		fullBatch:     make(chan struct{}, 1),
 		serializer:    reporter.JSONSerializer{},
 	}
 
@@ -244,6 +244,7 @@ func NewReporter(url string, opts ...ReporterOption) reporter.Reporter {
 	}
 
 	go r.loop()
+	go r.batchLoop()
 
 	return &r
 }
